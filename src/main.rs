@@ -26,7 +26,7 @@ use multihash::Multihash;
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -118,17 +118,24 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         if resp.status() != 200 {
             return Ok(resp);
         }
-
-        let reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-        // 1GB
-        let reader = BufReader::with_capacity(1073741824, reader);
         let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
-        let reader = reader.chain(tokio::io::repeat(0)).take(upsize.0);
+
+        let mut reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+        // 1GB
+        let (mut tx, rx) = tokio::io::duplex(1073741824);
+
+        let join = tokio::spawn(async move {
+            tokio::io::copy(&mut reader, &mut tx).await
+        });
+
+        let reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
         let fr32_reader = Fr32Reader::async_new(reader);
         let mut commitment_reader = CommitmentReader::new(fr32_reader);
 
         commitment_reader.consume().await?;
         let cid_buff = commitment_reader.finish()?;
+        join.await??;
+
         let hash = Multihash::wrap(0x1012, cid_buff.as_ref())?;
         let c = Cid::new_v1(0xf101, hash);
 
