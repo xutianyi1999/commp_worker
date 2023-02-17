@@ -20,6 +20,7 @@ log = "0.4"
 log4rs = "1"
 toml = "0.5"
 clap = { version = "4", features = ["derive"] }
+rand = "0.8"
 
 multihash = { version = "0.18", default-features = false, features = ["std", "multihash-impl", "sha2"] }
 cid = { version = "0.10" }

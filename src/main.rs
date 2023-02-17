@@ -1,25 +1,29 @@
+use std::{io, task, vec};
 use std::convert::Infallible;
-use std::io;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use cid::Cid;
 use clap::Parser;
 use fr32::Fr32Reader;
-use futures_util::TryStreamExt;
+use futures_util::{FutureExt, TryStreamExt};
+use futures_util::future::Map;
 use hyper::{Body, Client, http, Request, Response, Server, Uri};
 use hyper::body::Buf;
+use hyper::client::connect::dns::{GaiAddrs, GaiFuture, GaiResolver, Name};
 use hyper::client::HttpConnector;
-use hyper::service::{make_service_fn, service_fn};
-use log::{info, LevelFilter};
+use hyper::service::{make_service_fn, Service, service_fn};
+use log::{debug, info, LevelFilter};
 use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use mimalloc::MiMalloc;
 use multihash::Multihash;
+use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
@@ -35,6 +39,42 @@ mod commitment_reader;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[derive(Clone)]
+struct RoundRobin {
+    inner: GaiResolver,
+}
+
+impl Service<Name> for RoundRobin {
+    type Response = vec::IntoIter<SocketAddr>;
+    type Error = io::Error;
+    type Future = Map<GaiFuture, fn(Result<GaiAddrs, io::Error>) -> Result<Self::Response, io::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), io::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, name: Name) -> Self::Future {
+        self.inner.call(name).map(|v| {
+            match v {
+                Ok(v) => {
+                    let mut list: Vec<SocketAddr> = v.collect();
+
+                    if list.len() > 1 {
+                        let i = rand::thread_rng().gen_range(0..list.len());
+                        list = vec![list[i]];
+                    }
+
+                    if !list.is_empty() {
+                        debug!("ip select {}", list[0]);
+                    }
+                    Ok(list.into_iter())
+                }
+                Err(e) => Err(e)
+            }
+        })
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3Config {
@@ -62,7 +102,7 @@ struct Req {
 struct Context {
     s3: S3Config,
     bucket: Bucket,
-    client: Client<HttpConnector>,
+    client: Client<HttpConnector<RoundRobin>>,
 }
 
 async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
@@ -76,7 +116,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
         if resp.status() != 200 {
-            return Ok(resp)
+            return Ok(resp);
         }
 
         let reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
@@ -112,7 +152,10 @@ async fn exec(bind_addr: SocketAddr, s3_config: S3Config) -> Result<()> {
         s3_config.region.clone(),
     )?;
 
-    let client = Client::new();
+    let connector = HttpConnector::new_with_resolver(RoundRobin { inner: GaiResolver::new() });
+
+    let client = Client::builder()
+        .build(connector);
 
     let ctx = Context {
         bucket,
@@ -168,7 +211,7 @@ struct Args {
     s3_config_path: String,
 
     #[arg(short, long)]
-    bind_addr: SocketAddr
+    bind_addr: SocketAddr,
 }
 
 fn main() -> Result<()> {
