@@ -1,0 +1,31 @@
+[package]
+name = "commp_server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mimalloc = { version = "*", default-features = false }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+hyper = { version = "0.14", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusty-s3 = "0.4"
+url = "2"
+futures-util = "0.3"
+log = "0.4"
+log4rs = "1"
+toml = "0.5"
+clap = { version = "4", features = ["derive"] }
+
+multihash = { version = "0.18", default-features = false, features = ["std", "multihash-impl", "sha2"] }
+cid = { version = "0.10" }
+filecoin-hashers = { git = "https://github.com/gh-efforts/rust-fil-proofs.git", branch = "brf/async", default-features = false, features = ["sha256", "poseidon"] }
+fr32 = { git = "https://github.com/gh-efforts/rust-fil-proofs.git", branch = "brf/async", default-features = false, features = ["async"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
