@@ -10,7 +10,7 @@ use cid::Cid;
 use clap::Parser;
 use fr32::Fr32Reader;
 use futures_util::TryStreamExt;
-use hyper::{Body, Client, Request, Response, Server, Uri};
+use hyper::{Body, Client, http, Request, Response, Server, Uri};
 use hyper::body::Buf;
 use hyper::client::HttpConnector;
 use hyper::service::{make_service_fn, service_fn};
@@ -65,28 +65,43 @@ struct Context {
     client: Client<HttpConnector>,
 }
 
-async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>> {
-    let body = hyper::body::aggregate(req.into_body()).await?;
-    let req: Req = serde_json::from_reader(body.reader())?;
+async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
+    let fut = async {
+        let body = hyper::body::aggregate(req.into_body()).await?;
+        let req: Req = serde_json::from_reader(body.reader())?;
 
-    let t = Instant::now();
+        let t = Instant::now();
 
-    let object_url = get_object_url(&req.key, &ctx.bucket, &ctx.s3)?;
-    let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
+        let object_url = get_object_url(&req.key, &ctx.bucket, &ctx.s3)?;
+        let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
-    let reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-    let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
-    let reader = reader.chain(tokio::io::repeat(0)).take(upsize.0);
-    let fr32_reader = Fr32Reader::async_new(reader);
-    let mut commitment_reader = CommitmentReader::new(fr32_reader);
+        if resp.status() != 200 {
+            return Ok(resp)
+        }
 
-    commitment_reader.consume().await?;
-    let cid_buff = commitment_reader.finish()?;
-    let hash = Multihash::wrap(0x1012, cid_buff.as_ref())?;
-    let c = Cid::new_v1(0xf101, hash);
+        let reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+        let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
+        let reader = reader.chain(tokio::io::repeat(0)).take(upsize.0);
+        let fr32_reader = Fr32Reader::async_new(reader);
+        let mut commitment_reader = CommitmentReader::new(fr32_reader);
 
-    info!("compute {} commp use {} secs", req.key, t.elapsed().as_secs());
-    Ok(Response::new(Body::from(c.to_string())))
+        commitment_reader.consume().await?;
+        let cid_buff = commitment_reader.finish()?;
+        let hash = Multihash::wrap(0x1012, cid_buff.as_ref())?;
+        let c = Cid::new_v1(0xf101, hash);
+
+        info!("compute {} commp use {} secs", req.key, t.elapsed().as_secs());
+        Result::<_, anyhow::Error>::Ok(Response::new(Body::from(c.to_string())))
+    };
+
+    match fut.await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            Response::builder()
+                .status(500)
+                .body(Body::from(e.to_string()))
+        }
+    }
 }
 
 async fn exec(bind_addr: SocketAddr, s3_config: S3Config) -> Result<()> {
