@@ -1,5 +1,5 @@
 [package]
-name = "commp_server"
+name = "commp_worker"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusty-s3 = "0.4"
 url = "2"
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false }
 log = "0.4"
 log4rs = "1"
 toml = "0.5"

@@ -165,5 +165,6 @@ fn main() -> Result<()> {
     logger_init()?;
 
     let rt = tokio::runtime::Runtime::new()?;
+    info!("Listening on http://{}", args.bind_addr);
     rt.block_on(exec(args.bind_addr, s3_config))
 }
