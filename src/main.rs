@@ -17,7 +17,7 @@ use hyper::body::Buf;
 use hyper::client::connect::dns::{GaiAddrs, GaiFuture, GaiResolver, Name};
 use hyper::client::HttpConnector;
 use hyper::service::{make_service_fn, Service, service_fn};
-use log::{debug, info, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
@@ -103,6 +103,7 @@ struct Context {
     s3: S3Config,
     bucket: Bucket,
     client: Client<HttpConnector<RoundRobin>>,
+    buff_size: usize
 }
 
 async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
@@ -121,8 +122,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
 
         let mut reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-        // 1GB
-        let (mut tx, rx) = tokio::io::duplex(1073741824);
+        let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
 
         let join = tokio::spawn(async move {
             tokio::io::copy(&mut reader, &mut tx).await
@@ -146,6 +146,8 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
     match fut.await {
         Ok(resp) => Ok(resp),
         Err(e) => {
+            error!("{}", e);
+
             Response::builder()
                 .status(500)
                 .body(Body::from(e.to_string()))
@@ -153,7 +155,11 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
     }
 }
 
-async fn exec(bind_addr: SocketAddr, s3_config: S3Config) -> Result<()> {
+async fn exec(
+    bind_addr: SocketAddr,
+    s3_config: S3Config,
+    buff_size: usize
+) -> Result<()> {
     let bucket = Bucket::new(
         Url::parse(&s3_config.host)?,
         UrlStyle::VirtualHost,
@@ -170,6 +176,7 @@ async fn exec(bind_addr: SocketAddr, s3_config: S3Config) -> Result<()> {
         bucket,
         s3: s3_config,
         client,
+        buff_size
     };
     let ctx = Arc::new(ctx);
 
@@ -221,6 +228,9 @@ struct Args {
 
     #[arg(short, long)]
     bind_addr: SocketAddr,
+
+    #[arg(short, long)]
+    stream_buff_size: usize
 }
 
 fn main() -> Result<()> {
@@ -233,5 +243,5 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     info!("Listening on http://{}", args.bind_addr);
-    rt.block_on(exec(args.bind_addr, s3_config))
+    rt.block_on(exec(args.bind_addr, s3_config, args.stream_buff_size))
 }
