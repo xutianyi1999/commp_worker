@@ -26,7 +26,7 @@ use multihash::Multihash;
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -120,6 +120,8 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         }
 
         let reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+        // 1GB
+        let reader = BufReader::with_capacity(1073741824, reader);
         let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
         let reader = reader.chain(tokio::io::repeat(0)).take(upsize.0);
         let fr32_reader = Fr32Reader::async_new(reader);
