@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use cid::Cid;
 use clap::Parser;
 use fr32::Fr32Reader;
-use futures_util::{FutureExt, TryStreamExt};
+use futures_util::{FutureExt, StreamExt};
 use futures_util::future::Map;
 use hyper::{Body, Client, http, Request, Response, Server, Uri};
 use hyper::body::Buf;
@@ -26,9 +26,8 @@ use multihash::Multihash;
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
-use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::bytes_amount::{PaddedBytesAmount, UnpaddedBytesAmount};
@@ -121,11 +120,14 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         }
         let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
 
-        let mut reader = StreamReader::new(resp.into_body().map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+        let mut body = resp.into_body();
         let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
 
         let join = tokio::spawn(async move {
-            tokio::io::copy(&mut reader, &mut tx).await
+            while let Some(res) = body.next().await {
+                tx.write_all(&res?).await?;
+            }
+            Result::<_, anyhow::Error>::Ok(())
         });
 
         let reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
