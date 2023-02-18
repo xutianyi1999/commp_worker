@@ -123,15 +123,12 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let mut body = resp.into_body();
         let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
 
-        let join = tokio::spawn(async move {
-            let fut = async {
-                while let Some(res) = body.next().await {
-                    tx.write_all(&res?).await?;
-                }
-                Result::<_, anyhow::Error>::Ok(())
-            };
-            tokio::task::unconstrained(fut).await
-        });
+        let join = tokio::spawn(tokio::task::unconstrained( async move {
+            while let Some(res) = body.next().await {
+                tx.write_all(&res?).await?;
+            }
+            Result::<_, anyhow::Error>::Ok(())
+        }));
 
         let reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
         let fr32_reader = Fr32Reader::async_new(reader);
