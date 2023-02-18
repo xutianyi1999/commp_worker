@@ -124,10 +124,13 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
 
         let join = tokio::spawn(async move {
-            while let Some(res) = body.next().await {
-                tx.write_all(&res?).await?;
-            }
-            Result::<_, anyhow::Error>::Ok(())
+            let fut = async {
+                while let Some(res) = body.next().await {
+                    tx.write_all(&res?).await?;
+                }
+                Result::<_, anyhow::Error>::Ok(())
+            };
+            tokio::task::unconstrained(fut).await
         });
 
         let reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
