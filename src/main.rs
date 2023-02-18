@@ -167,7 +167,9 @@ async fn exec(
         s3_config.region.clone(),
     )?;
 
-    let connector = HttpConnector::new_with_resolver(RoundRobin { inner: GaiResolver::new() });
+    let mut connector = HttpConnector::new_with_resolver(RoundRobin { inner: GaiResolver::new() });
+    // 1GB
+    connector.set_recv_buffer_size(Some(1073741824));
 
     let client = Client::builder()
         .build(connector);
