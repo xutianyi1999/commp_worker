@@ -17,7 +17,7 @@ use hyper::body::Buf;
 use hyper::client::connect::dns::{GaiAddrs, GaiFuture, GaiResolver, Name};
 use hyper::client::HttpConnector;
 use hyper::service::{make_service_fn, Service, service_fn};
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info, LevelFilter, warn};
 use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
@@ -194,7 +194,13 @@ async fn exec(
         }
     });
 
-    let server = Server::bind(&bind_addr).serve(make_service);
+    let server = Server::bind(&bind_addr)
+        .serve(make_service)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.expect("failed to listen for event");
+            warn!("shutdown server");
+        });
+
     server.await.map_err(|e| anyhow!(e))
 }
 
