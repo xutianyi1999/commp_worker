@@ -27,6 +27,7 @@ use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use url::Url;
 
@@ -102,13 +103,16 @@ struct Context {
     s3: S3Config,
     bucket: Bucket,
     client: Client<HttpConnector<RoundRobin>>,
-    buff_size: usize
+    buff_size: usize,
+    sem: Semaphore
 }
 
 async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
     let fut = async {
         let body = hyper::body::aggregate(req.into_body()).await?;
         let req: Req = serde_json::from_reader(body.reader())?;
+
+        let _permit = ctx.sem.acquire().await?;
 
         let t = Instant::now();
 
@@ -160,7 +164,8 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
 async fn exec(
     bind_addr: SocketAddr,
     s3_config: S3Config,
-    buff_size: usize
+    buff_size: usize,
+    parallel_tasks: usize
 ) -> Result<()> {
     let bucket = Bucket::new(
         Url::parse(&s3_config.host)?,
@@ -176,11 +181,14 @@ async fn exec(
     let client = Client::builder()
         .build(connector);
 
+    let sem = Semaphore::new(parallel_tasks);
+
     let ctx = Context {
         bucket,
         s3: s3_config,
         client,
-        buff_size
+        buff_size,
+        sem
     };
     let ctx = Arc::new(ctx);
 
@@ -240,7 +248,10 @@ struct Args {
     bind_addr: SocketAddr,
 
     #[arg(short, long)]
-    stream_buff_size: usize
+    stream_buff_size: usize,
+
+    #[arg(short, long)]
+    parallel_tasks: usize
 }
 
 fn main() -> Result<()> {
@@ -253,5 +264,5 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     info!("Listening on http://{}", args.bind_addr);
-    rt.block_on(exec(args.bind_addr, s3_config, args.stream_buff_size))
+    rt.block_on(exec(args.bind_addr, s3_config, args.stream_buff_size, args.parallel_tasks))
 }

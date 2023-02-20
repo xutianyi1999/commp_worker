@@ -24,6 +24,7 @@ impl Cache {
         }
     }
 
+    #[inline(always)]
     fn push(&mut self, mut cid: <DefaultPieceHasher as Hasher>::Domain) {
         let cache = &mut self.cache;
 
@@ -49,6 +50,7 @@ pub struct CommitmentReader<R> {
     current_tree: Cache,
 }
 
+#[inline(always)]
 pub fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> <DefaultPieceHasher as Hasher>::Domain {
     let mut buf = [0u8; NODE_SIZE * 2];
     buf[..NODE_SIZE].copy_from_slice(a);
@@ -67,6 +69,7 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
     }
 
     /// Attempt to generate the next hash, but only if the buffers are full.
+    #[inline(always)]
     fn try_hash(&mut self) {
         if self.buffer_pos < 63 {
             return;
@@ -89,6 +92,7 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
         f().ok_or_else(|| anyhow!("Get tree hash root failed"))
     }
 
+    #[inline(always)]
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let start = self.buffer_pos;
         let left = 64 - self.buffer_pos;
