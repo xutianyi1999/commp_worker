@@ -10,6 +10,7 @@ use tokio::io::AsyncRead;
 use crate::bytes_amount::{PaddedBytesAmount, UnpaddedBytesAmount};
 
 const NODE_SIZE: usize = 32;
+const TREE_CACHE: [[u8; 32]; 64] = gen_merkletree_cache::generate!(64);
 
 pub type DefaultPieceHasher = Sha256Hasher;
 
@@ -25,16 +26,26 @@ impl Cache {
     }
 
     #[inline(always)]
-    fn push(&mut self, mut cid: <DefaultPieceHasher as Hasher>::Domain) {
+    fn push(&mut self, mut cid: <DefaultPieceHasher as Hasher>::Domain, mut is_zero: bool) {
         let cache = &mut self.cache;
 
-        for opt in cache.iter_mut() {
+        for (layer, opt) in cache.iter_mut().enumerate() {
             match opt.take() {
                 None => {
                     *opt = Some(cid);
                     return;
                 }
-                Some(left) => cid = piece_hash(&left.0, &cid.0)
+                Some(left) => {
+                    if is_zero {
+                        if left == cid {
+                            cid = <DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[layer + 1]);
+                            continue;
+                        } else {
+                            is_zero = false;
+                        }
+                    }
+                    cid = piece_hash(&left.0, &cid.0)
+                }
             }
         }
         cache.push(Some(cid));
@@ -75,9 +86,13 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
             return;
         }
 
-        // WARNING: keep in sync with DefaultPieceHasher and its .node impl
-        let hash = <DefaultPieceHasher as Hasher>::Function::hash(&self.buffer);
-        self.current_tree.push(hash);
+        if self.buffer == [0u8; 64] {
+            self.current_tree.push(<DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[0]), true);
+        } else {
+            let hash = <DefaultPieceHasher as Hasher>::Function::hash(&self.buffer);
+            self.current_tree.push(hash, false);
+        };
+
         self.buffer_pos = 0;
     }
 
@@ -128,13 +143,13 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
 #[allow(unused)]
 fn unpadded_piece_size(size: u64) -> UnpaddedBytesAmount {
     if size <= 127 {
-        return UnpaddedBytesAmount(127)
+        return UnpaddedBytesAmount(127);
     }
 
     let mut padded_piece_size = (size + 126) / 127 * 128;
 
     if padded_piece_size.count_ones() != 1 {
-        padded_piece_size = 1 << 64-padded_piece_size.leading_zeros();
+        padded_piece_size = 1 << 64 - padded_piece_size.leading_zeros();
     }
     UnpaddedBytesAmount::from(PaddedBytesAmount(padded_piece_size))
 }
