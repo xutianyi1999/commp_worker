@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::io::{self};
+use std::simd::{u8x32, u8x64};
 
 use anyhow::{anyhow, ensure, Result};
 use filecoin_hashers::{Hasher, HashFunction};
@@ -37,7 +38,13 @@ impl Cache {
                 }
                 Some(left) => {
                     if is_zero {
-                        if left == cid {
+                        let flag = unsafe {
+                            let left_p: &u8x32 = std::mem::transmute(&left);
+                            let cid_p : &u8x32 = std::mem::transmute(&cid);
+                            left_p.eq(cid_p)
+                        };
+
+                        if flag {
                             cid = <DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[layer + 1]);
                             continue;
                         } else {
@@ -86,7 +93,12 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
             return;
         }
 
-        if self.buffer == [0u8; 64] {
+        const ZERO: u8x64 = u8x64::from_array([0u8; 64]);
+
+        let buffer_p: &u8x64 = unsafe {
+            std::mem::transmute(&self.buffer)
+        };
+        if buffer_p.eq(&ZERO) {
             self.current_tree.push(<DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[0]), true);
         } else {
             let hash = <DefaultPieceHasher as Hasher>::Function::hash(&self.buffer);

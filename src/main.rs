@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 use std::{io, task, vec};
 use std::convert::Infallible;
 use std::net::SocketAddr;
