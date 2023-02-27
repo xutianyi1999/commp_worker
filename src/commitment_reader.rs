@@ -38,10 +38,10 @@ impl Cache {
                 }
                 Some(left) => {
                     if is_zero {
-                        let flag = unsafe {
-                            let left_p: &u8x32 = std::mem::transmute(&left);
-                            let cid_p : &u8x32 = std::mem::transmute(&cid);
-                            left_p.eq(cid_p)
+                        let flag = {
+                            let left = u8x32::from_array(left.0);
+                            let right = u8x32::from_array(cid.0);
+                            left == right
                         };
 
                         if flag {
@@ -94,11 +94,9 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
         }
 
         const ZERO: u8x64 = u8x64::from_array([0u8; 64]);
+        let buff = u8x64::from_array(self.buffer);
 
-        let buffer_p: &u8x64 = unsafe {
-            std::mem::transmute(&self.buffer)
-        };
-        if buffer_p.eq(&ZERO) {
+        if buff == ZERO {
             self.current_tree.push(<DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[0]), true);
         } else {
             let hash = <DefaultPieceHasher as Hasher>::Function::hash(&self.buffer);
