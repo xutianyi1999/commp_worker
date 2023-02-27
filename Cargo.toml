@@ -21,10 +21,11 @@ toml = "0.5"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 
-multihash = { version = "0.18", default-features = false, features = ["std", "multihash-impl", "sha2"] }
+sha2 = "0.10"
+digest = "0.10"
+multihash = { version = "0.18", default-features = false }
+fr32 = "5"
 cid = { version = "0.10" }
-filecoin-hashers = { git = "https://github.com/gh-efforts/rust-fil-proofs.git", branch = "brf/async", default-features = false, features = ["sha256", "poseidon"] }
-fr32 = { git = "https://github.com/gh-efforts/rust-fil-proofs.git", branch = "brf/async", default-features = false, features = ["async"] }
 gen_merkletree_cache = { git = "https://github.com/xutianyi1999/gen_merkletree_cache" }
 
 [profile.release]

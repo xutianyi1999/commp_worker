@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(split_array)]
 
 use std::{io, task, vec};
 use std::convert::Infallible;
@@ -8,10 +9,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 use cid::Cid;
 use clap::Parser;
-use fr32::Fr32Reader;
 use futures_util::{FutureExt, StreamExt};
 use futures_util::future::Map;
 use hyper::{Body, Client, http, Request, Response, Server, Uri};
@@ -38,6 +38,7 @@ use crate::commitment_reader::CommitmentReader;
 
 mod bytes_amount;
 mod commitment_reader;
+mod fr32_reader;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -106,7 +107,7 @@ struct Context {
     bucket: Bucket,
     client: Client<HttpConnector<RoundRobin>>,
     buff_size: usize,
-    sem: Semaphore
+    sem: Semaphore,
 }
 
 async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
@@ -114,8 +115,10 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let body = hyper::body::aggregate(req.into_body()).await?;
         let req: Req = serde_json::from_reader(body.reader())?;
 
-        let _permit = ctx.sem.acquire().await?;
+        let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
+        ensure!(upsize.0 % 127 == 0);
 
+        let _permit = ctx.sem.acquire().await?;
         let t = Instant::now();
 
         let object_url = get_object_url(&req.key, &ctx.bucket, &ctx.s3)?;
@@ -124,7 +127,6 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         if resp.status() != 200 {
             return Ok(resp);
         }
-        let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
 
         let mut body = resp.into_body();
         let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
@@ -136,15 +138,14 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
             Result::<_, anyhow::Error>::Ok(())
         });
 
-        let reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
-        let fr32_reader = Fr32Reader::async_new(reader);
-        let mut commitment_reader = CommitmentReader::new(fr32_reader);
+        let mut reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
+        let mut commitment_reader = CommitmentReader::new(&mut reader);
 
-        commitment_reader.consume().await?;
+        commitment_reader.consume(upsize.0 / 127).await?;
         let cid_buff = commitment_reader.finish()?;
         join.await??;
 
-        let hash = Multihash::wrap(0x1012, cid_buff.as_ref())?;
+        let hash = Multihash::wrap(0x1012, &cid_buff)?;
         let c = Cid::new_v1(0xf101, hash);
 
         info!("compute {} commp use {} secs", req.key, t.elapsed().as_secs());
@@ -167,7 +168,7 @@ async fn exec(
     bind_addr: SocketAddr,
     s3_config: S3Config,
     buff_size: usize,
-    parallel_tasks: usize
+    parallel_tasks: usize,
 ) -> Result<()> {
     let bucket = Bucket::new(
         Url::parse(&s3_config.host)?,
@@ -190,7 +191,7 @@ async fn exec(
         s3: s3_config,
         client,
         buff_size,
-        sem
+        sem,
     };
     let ctx = Arc::new(ctx);
 
@@ -253,7 +254,7 @@ struct Args {
     stream_buff_size: usize,
 
     #[arg(short, long)]
-    parallel_tasks: usize
+    parallel_tasks: usize,
 }
 
 fn main() -> Result<()> {

@@ -1,22 +1,17 @@
-use std::cmp::min;
-use std::io::{self};
 use std::simd::{u8x32, u8x64};
 
-use anyhow::{anyhow, ensure, Result};
-use filecoin_hashers::{Hasher, HashFunction};
-use filecoin_hashers::sha256::Sha256Hasher;
-use fr32::Fr32Reader;
+use anyhow::{anyhow, Result};
+use digest::Digest;
+use sha2::Sha256;
 use tokio::io::AsyncRead;
 
-use crate::bytes_amount::{PaddedBytesAmount, UnpaddedBytesAmount};
+use crate::fr32_reader;
 
 const NODE_SIZE: usize = 32;
 const TREE_CACHE: [[u8; 32]; 64] = gen_merkletree_cache::generate!(64);
 
-pub type DefaultPieceHasher = Sha256Hasher;
-
 struct Cache {
-    cache: Vec<Option<<DefaultPieceHasher as Hasher>::Domain>>,
+    cache: Vec<Option<[u8; 32]>>,
 }
 
 impl Cache {
@@ -27,7 +22,7 @@ impl Cache {
     }
 
     #[inline(always)]
-    fn push(&mut self, mut cid: <DefaultPieceHasher as Hasher>::Domain, mut is_zero: bool) {
+    fn push(&mut self, mut cid: [u8; 32], mut is_zero: bool) {
         let cache = &mut self.cache;
 
         for (layer, opt) in cache.iter_mut().enumerate() {
@@ -39,19 +34,19 @@ impl Cache {
                 Some(left) => {
                     if is_zero {
                         let flag = {
-                            let left = u8x32::from_array(left.0);
-                            let right = u8x32::from_array(cid.0);
+                            let left = u8x32::from_array(left);
+                            let right = u8x32::from_array(cid);
                             left == right
                         };
 
                         if flag {
-                            cid = <DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[layer + 1]);
+                            cid = TREE_CACHE[layer + 1];
                             continue;
                         } else {
                             is_zero = false;
                         }
                     }
-                    cid = piece_hash(&left.0, &cid.0)
+                    cid = piece_hash(&left, &cid)
                 }
             }
         }
@@ -59,56 +54,56 @@ impl Cache {
     }
 }
 
-/// Calculates comm-d of the data piped through to it.
-/// Data must be bit padded and power of 2 bytes.
-pub struct CommitmentReader<R> {
-    source: Fr32Reader<R>,
-    buffer: [u8; 64],
-    buffer_pos: usize,
+#[inline(always)]
+fn trim_to_fr32(buff: &mut [u8; 32]) {
+    // strip last two bits, to ensure result is in Fr.
+    buff[31] &= 0b0011_1111;
+}
+
+#[inline(always)]
+fn hash(data: &[u8; 64]) -> [u8; 32] {
+    let mut hashed = Sha256::digest(data);
+    let hash: &mut [u8; 32] = hashed.as_mut_slice().try_into().unwrap();
+    trim_to_fr32(hash);
+    *hash
+}
+
+pub struct CommitmentReader<'a, R> {
+    source: &'a mut R,
     current_tree: Cache,
 }
 
 #[inline(always)]
-pub fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> <DefaultPieceHasher as Hasher>::Domain {
+pub fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> [u8; 32] {
     let mut buf = [0u8; NODE_SIZE * 2];
     buf[..NODE_SIZE].copy_from_slice(a);
     buf[NODE_SIZE..].copy_from_slice(b);
-    <DefaultPieceHasher as Hasher>::Function::hash(&buf)
+    hash(&buf)
 }
 
-impl<R: AsyncRead + Unpin> CommitmentReader<R> {
-    pub fn new(source: Fr32Reader<R>) -> Self {
+impl<'a, R: AsyncRead + Unpin> CommitmentReader<'a, R> {
+    pub fn new(source: &'a mut R) -> Self {
         CommitmentReader {
             source,
-            buffer: [0u8; 64],
-            buffer_pos: 0,
             current_tree: Cache::new(),
         }
     }
 
     /// Attempt to generate the next hash, but only if the buffers are full.
     #[inline(always)]
-    fn try_hash(&mut self) {
-        if self.buffer_pos < 63 {
-            return;
-        }
-
+    fn try_hash(&mut self, in_buff: &[u8; 64]) {
         const ZERO: u8x64 = u8x64::from_array([0u8; 64]);
-        let buff = u8x64::from_array(self.buffer);
+        let buff = u8x64::from_array(*in_buff);
 
         if buff == ZERO {
-            self.current_tree.push(<DefaultPieceHasher as Hasher>::Domain::from(TREE_CACHE[0]), true);
+            self.current_tree.push(TREE_CACHE[0], true);
         } else {
-            let hash = <DefaultPieceHasher as Hasher>::Function::hash(&self.buffer);
+            let hash = hash(in_buff);
             self.current_tree.push(hash, false);
         };
-
-        self.buffer_pos = 0;
     }
 
-    pub fn finish(self) -> Result<<DefaultPieceHasher as Hasher>::Domain> {
-        ensure!(self.buffer_pos == 0, "not enough inputs provided");
-
+    pub fn finish(self) -> Result<[u8; 32]> {
         let CommitmentReader { mut current_tree, .. } = self;
 
         let mut f = || {
@@ -117,49 +112,14 @@ impl<R: AsyncRead + Unpin> CommitmentReader<R> {
         f().ok_or_else(|| anyhow!("Get tree hash root failed"))
     }
 
-    #[inline(always)]
-    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let start = self.buffer_pos;
-        let left = 64 - self.buffer_pos;
-        let end = start + min(left, buf.len());
-
-        // fill the buffer as much as possible
-        let r = self.source.read(&mut self.buffer[start..end]).await?;
-
-        // write the data, we read
-        buf[..r].copy_from_slice(&self.buffer[start..start + r]);
-
-        self.buffer_pos += r;
-
-        // try to hash
-        self.try_hash();
-
-        Ok(r)
-    }
-
-    pub async fn consume(&mut self) -> io::Result<()> {
+    pub async fn consume(&mut self, blocks: u64) -> Result<()> {
         let mut buff = [0u8; 128];
 
-        loop {
-            let len = self.read(&mut buff).await?;
-
-            if len == 0 {
-                return Ok(());
-            }
+        for _ in 0..blocks {
+            fr32_reader::read_block(self.source, &mut buff).await?;
+            self.try_hash((&buff[..64]).try_into().unwrap());
+            self.try_hash((&buff[64..]).try_into().unwrap());
         }
+        Ok(())
     }
-}
-
-#[allow(unused)]
-fn unpadded_piece_size(size: u64) -> UnpaddedBytesAmount {
-    if size <= 127 {
-        return UnpaddedBytesAmount(127);
-    }
-
-    let mut padded_piece_size = (size + 126) / 127 * 128;
-
-    if padded_piece_size.count_ones() != 1 {
-        padded_piece_size = 1 << 64 - padded_piece_size.leading_zeros();
-    }
-    UnpaddedBytesAmount::from(PaddedBytesAmount(padded_piece_size))
 }
