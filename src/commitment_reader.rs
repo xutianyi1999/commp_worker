@@ -1,4 +1,4 @@
-use std::simd::{u8x32, u8x64};
+use std::simd::u8x32;
 
 use anyhow::{anyhow, Result};
 use digest::Digest;
@@ -25,7 +25,7 @@ impl Cache {
     fn push(&mut self, mut cid: [u8; 32], mut is_zero: bool) {
         let cache = &mut self.cache;
 
-        for (layer, opt) in cache.iter_mut().enumerate() {
+        for (opt, tree_node) in cache.iter_mut().zip(&TREE_CACHE[1..]) {
             match opt.take() {
                 None => {
                     *opt = Some(cid);
@@ -40,7 +40,7 @@ impl Cache {
                         };
 
                         if flag {
-                            cid = TREE_CACHE[layer + 1];
+                            cid = *tree_node;
                             continue;
                         } else {
                             is_zero = false;
@@ -91,11 +91,8 @@ impl<'a, R: AsyncRead + Unpin> CommitmentReader<'a, R> {
 
     /// Attempt to generate the next hash, but only if the buffers are full.
     #[inline(always)]
-    fn try_hash(&mut self, in_buff: &[u8; 64]) {
-        const ZERO: u8x64 = u8x64::from_array([0u8; 64]);
-        let buff = u8x64::from_array(*in_buff);
-
-        if buff == ZERO {
+    fn try_hash(&mut self, in_buff: &[u8; 64], is_zero: bool) {
+        if is_zero {
             self.current_tree.push(TREE_CACHE[0], true);
         } else {
             let hash = hash(in_buff);
@@ -116,9 +113,9 @@ impl<'a, R: AsyncRead + Unpin> CommitmentReader<'a, R> {
         let mut buff = [0u8; 128];
 
         for _ in 0..blocks {
-            fr32_reader::read_block(self.source, &mut buff).await?;
-            self.try_hash((&buff[..64]).try_into().unwrap());
-            self.try_hash((&buff[64..]).try_into().unwrap());
+            let is_zero = fr32_reader::read_block(self.source, &mut buff).await?;
+            self.try_hash((&buff[..64]).try_into().unwrap(), is_zero);
+            self.try_hash((&buff[64..]).try_into().unwrap(), is_zero);
         }
         Ok(())
     }

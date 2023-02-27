@@ -38,9 +38,21 @@ fn process_block(in_buffer: &[u8; 128], out_buffer: &mut [u8; 128]) {
 }
 
 #[inline(always)]
-pub async fn read_block<R: AsyncRead + Unpin>(reader: &mut R, out: &mut [u8; 128]) -> Result<()> {
+pub async fn read_block<R: AsyncRead + Unpin>(reader: &mut R, out: &mut [u8; 128]) -> Result<bool> {
     let mut buff = [0u8; 128];
     reader.read_exact(&mut buff[..127]).await?;
-    process_block(&buff, out);
-    Ok(())
+
+    let mut is_zero = true;
+
+    for x in buff {
+        if x != 0 {
+            is_zero = false;
+            break;
+        }
+    }
+
+    if !is_zero {
+        process_block(&buff, out);
+    }
+    Ok(is_zero)
 }
