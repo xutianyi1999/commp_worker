@@ -1,5 +1,3 @@
-use std::simd::u8x32;
-
 use anyhow::{anyhow, Result};
 use digest::Digest;
 use sha2::Sha256;
@@ -8,7 +6,6 @@ use tokio::io::AsyncRead;
 use crate::fr32_reader;
 
 const NODE_SIZE: usize = 32;
-const TREE_CACHE: [[u8; 32]; 64] = gen_merkletree_cache::generate!(64);
 
 struct Cache {
     cache: Vec<Option<[u8; 32]>>,
@@ -22,32 +19,16 @@ impl Cache {
     }
 
     #[inline(always)]
-    fn push(&mut self, mut cid: [u8; 32], mut is_zero: bool) {
+    fn push(&mut self, mut cid: [u8; 32]) {
         let cache = &mut self.cache;
 
-        for (opt, tree_node) in cache.iter_mut().zip(&TREE_CACHE[1..]) {
+        for opt in cache.iter_mut() {
             match opt.take() {
                 None => {
                     *opt = Some(cid);
                     return;
                 }
-                Some(left) => {
-                    if is_zero {
-                        let flag = {
-                            let left = u8x32::from_array(left);
-                            let right = u8x32::from_array(cid);
-                            left == right
-                        };
-
-                        if flag {
-                            cid = *tree_node;
-                            continue;
-                        } else {
-                            is_zero = false;
-                        }
-                    }
-                    cid = piece_hash(&left, &cid)
-                }
+                Some(left) => cid = piece_hash(&left, &cid)
             }
         }
         cache.push(Some(cid));
@@ -91,13 +72,9 @@ impl<'a, R: AsyncRead + Unpin> CommitmentReader<'a, R> {
 
     /// Attempt to generate the next hash, but only if the buffers are full.
     #[inline(always)]
-    fn try_hash(&mut self, in_buff: &[u8; 64], is_zero: bool) {
-        if is_zero {
-            self.current_tree.push(TREE_CACHE[0], true);
-        } else {
-            let hash = hash(in_buff);
-            self.current_tree.push(hash, false);
-        };
+    fn try_hash(&mut self, in_buff: &[u8; 64]) {
+        let hash = hash(in_buff);
+        self.current_tree.push(hash);
     }
 
     pub fn finish(self) -> Result<[u8; 32]> {
@@ -113,9 +90,9 @@ impl<'a, R: AsyncRead + Unpin> CommitmentReader<'a, R> {
         let mut buff = [0u8; 128];
 
         for _ in 0..blocks {
-            let is_zero = fr32_reader::read_block(self.source, &mut buff).await?;
-            self.try_hash((&buff[..64]).try_into().unwrap(), is_zero);
-            self.try_hash((&buff[64..]).try_into().unwrap(), is_zero);
+            fr32_reader::read_block(self.source, &mut buff).await?;
+            self.try_hash((&buff[..64]).try_into().unwrap());
+            self.try_hash((&buff[64..]).try_into().unwrap());
         }
         Ok(())
     }

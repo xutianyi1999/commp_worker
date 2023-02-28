@@ -1,6 +1,3 @@
-#![feature(portable_simd)]
-#![feature(split_array)]
-
 use std::{io, task, vec};
 use std::convert::Infallible;
 use std::net::SocketAddr;

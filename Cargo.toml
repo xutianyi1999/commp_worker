@@ -26,7 +26,6 @@ digest = "0.10"
 multihash = { version = "0.18", default-features = false }
 fr32 = "5"
 cid = { version = "0.10" }
-gen_merkletree_cache = { git = "https://github.com/xutianyi1999/gen_merkletree_cache" }
 
 [profile.release]
 lto = true
