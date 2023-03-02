@@ -1,4 +1,5 @@
 use std::{io, task, vec};
+use std::cmp::min;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -25,17 +26,16 @@ use multihash::Multihash;
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use url::Url;
 
 use crate::bytes_amount::{PaddedBytesAmount, UnpaddedBytesAmount};
-use crate::commitment_reader::CommitmentReader;
+use crate::commitment::Commitment;
 
 mod bytes_amount;
-mod commitment_reader;
-mod fr32_reader;
+mod commitment;
+mod fr32_util;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -125,22 +125,86 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
             return Ok(resp);
         }
 
-        let mut body = resp.into_body();
-        let (mut tx, rx) = tokio::io::duplex(ctx.buff_size);
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
-        let join = tokio::spawn(async move {
-            while let Some(res) = body.next().await {
-                tx.write_all(&res?).await?;
+        let join = tokio::task::spawn_blocking(move || {
+            let mut commitment = Commitment::new();
+            let mut chunk = [0u8; 128];
+            let mut read_data = 0;
+            let mut remain = 0;
+
+            while let Ok(buff) = rx.recv() {
+                read_data += buff.len();
+                let mut right = buff.as_slice();
+
+                if remain != 0 {
+                    let (l, r) = right.split_at(min(127 - remain, right.len()));
+                    right = r;
+
+                    if l.len() + remain == 127 {
+                        chunk[remain..127].copy_from_slice(l);
+                        remain = 0;
+
+                        commitment.consume(&chunk);
+                    } else {
+                        remain += l.len();
+                    }
+                }
+
+                while right.len() >= 127 {
+                    let (l, r) = right.split_at(127);
+                    chunk[0..127].copy_from_slice(l);
+                    right = r;
+
+                    commitment.consume(&chunk);
+                }
+
+                if right.len() != 0 {
+                    chunk[..right.len()].copy_from_slice(right);
+                    remain = right.len()
+                }
             }
-            Result::<_, anyhow::Error>::Ok(())
+
+            if remain != 0 {
+                for x in chunk[remain..].iter_mut() {
+                    *x = 0;
+                }
+                read_data += 127 - remain;
+                commitment.consume(&chunk);
+            }
+
+            let zero_size = upsize.0 - read_data as u64;
+            ensure!(zero_size % 127 == 0);
+
+            let common_hash = commitment::hash(&[0u8; 64]);
+
+            for _ in 0..zero_size / 127 * 2 {
+                commitment.consume_with_hash(common_hash);
+            }
+            commitment.finish()
         });
 
-        let mut reader = rx.chain(tokio::io::repeat(0)).take(upsize.0);
-        let mut commitment_reader = CommitmentReader::new(&mut reader);
+        let mut body = resp.into_body();
+        // 1GB
+        let mut buff = Vec::<u8>::with_capacity(ctx.buff_size);
 
-        commitment_reader.consume(upsize.0 / 127).await?;
-        let cid_buff = commitment_reader.finish()?;
-        join.await??;
+        while let Some(res) = body.next().await {
+            let packet = res?;
+
+            if buff.len() + packet.len() > buff.capacity() {
+                ensure!(ctx.buff_size >= packet.len());
+                let buff = std::mem::replace(&mut buff, Vec::<u8>::with_capacity(ctx.buff_size));
+                tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+            }
+            buff.extend(packet);
+        }
+
+        if !buff.is_empty() {
+            tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+        }
+
+        drop(tx);
+        let cid_buff = join.await??;
 
         let hash = Multihash::wrap(0x1012, &cid_buff)?;
         let c = Cid::new_v1(0xf101, hash);
