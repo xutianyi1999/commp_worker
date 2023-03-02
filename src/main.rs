@@ -3,7 +3,7 @@ use std::cmp::min;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -126,6 +126,8 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let mem_queue = Arc::new(Mutex::new(Vec::new()));
+        let inner_mem_queue = mem_queue.clone();
 
         let join = tokio::task::spawn_blocking(move || {
             let mut commitment = Commitment::new();
@@ -133,7 +135,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
             let mut read_data = 0;
             let mut remain = 0;
 
-            while let Ok(buff) = rx.recv() {
+            while let Ok(mut buff) = rx.recv() {
                 read_data += buff.len();
                 let mut right = buff.as_slice();
 
@@ -162,6 +164,9 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
                     chunk[..right.len()].copy_from_slice(right);
                     remain = right.len()
                 }
+
+                buff.clear();
+                inner_mem_queue.lock().unwrap().push(buff);
             }
 
             if remain != 0 {
@@ -192,7 +197,13 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
 
             if buff.len() + packet.len() > buff.capacity() {
                 ensure!(ctx.buff_size >= packet.len());
-                let buff = std::mem::replace(&mut buff, Vec::<u8>::with_capacity(ctx.buff_size));
+
+                let new = match mem_queue.lock().unwrap().pop() {
+                    None => Vec::<u8>::with_capacity(ctx.buff_size),
+                    Some(v) => v,
+                };
+
+                let buff = std::mem::replace(&mut buff, new);
                 tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
             }
             buff.extend(packet);
