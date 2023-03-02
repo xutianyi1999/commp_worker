@@ -3,7 +3,7 @@ use std::cmp::min;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use mimalloc::MiMalloc;
 use multihash::Multihash;
+use parking_lot::Mutex;
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
@@ -39,6 +40,7 @@ mod fr32_util;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+static BUFFER_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 #[derive(Clone)]
 struct RoundRobin {
@@ -126,8 +128,6 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let mem_queue = Arc::new(Mutex::new(Vec::new()));
-        let inner_mem_queue = mem_queue.clone();
 
         let join = tokio::task::spawn_blocking(move || {
             let mut commitment = Commitment::new();
@@ -166,7 +166,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
                 }
 
                 buff.clear();
-                inner_mem_queue.lock().unwrap().push(buff);
+                BUFFER_QUEUE.lock().push(buff);
             }
 
             if remain != 0 {
@@ -189,8 +189,12 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         });
 
         let mut body = resp.into_body();
-        // 1GB
-        let mut buff = Vec::<u8>::with_capacity(ctx.buff_size);
+
+        let get_buf = || {
+            BUFFER_QUEUE.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(ctx.buff_size))
+        };
+
+        let mut buff = get_buf();
 
         while let Some(res) = body.next().await {
             let packet = res?;
@@ -198,12 +202,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
             if buff.len() + packet.len() > buff.capacity() {
                 ensure!(ctx.buff_size >= packet.len());
 
-                let new = match mem_queue.lock().unwrap().pop() {
-                    None => Vec::<u8>::with_capacity(ctx.buff_size),
-                    Some(v) => v,
-                };
-
-                let buff = std::mem::replace(&mut buff, new);
+                let buff = std::mem::replace(&mut buff, get_buf());
                 tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
             }
             buff.extend(packet);
