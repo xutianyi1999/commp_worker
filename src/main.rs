@@ -140,11 +140,10 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
                 if remain != 0 {
                     let (l, r) = right.split_at(min(127 - remain, right.len()));
                     right = r;
+                    chunk[remain..remain + l.len()].copy_from_slice(l);
 
                     if l.len() + remain == 127 {
-                        chunk[remain..127].copy_from_slice(l);
                         remain = 0;
-
                         commitment.consume(&chunk);
                     } else {
                         remain += l.len();

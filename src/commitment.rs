@@ -53,7 +53,7 @@ pub struct Commitment {
 }
 
 #[inline(always)]
-pub fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> [u8; 32] {
+fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> [u8; 32] {
     let mut buf = [0u8; NODE_SIZE * 2];
     buf[..NODE_SIZE].copy_from_slice(a);
     buf[NODE_SIZE..].copy_from_slice(b);
