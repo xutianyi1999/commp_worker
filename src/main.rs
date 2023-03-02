@@ -311,7 +311,7 @@ struct Args {
     bind_addr: SocketAddr,
 
     #[arg(long)]
-    stream_buff_size: usize,
+    buff_size: usize,
 
     #[arg(short, long)]
     parallel_tasks: usize,
@@ -327,5 +327,5 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     info!("Listening on http://{}", args.bind_addr);
-    rt.block_on(exec(args.bind_addr, s3_config, args.stream_buff_size, args.parallel_tasks))
+    rt.block_on(exec(args.bind_addr, s3_config, args.buff_size, args.parallel_tasks))
 }
