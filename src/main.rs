@@ -252,6 +252,7 @@ async fn exec(
     connector.set_recv_buffer_size(Some(1073741824));
 
     let client = Client::builder()
+        .http1_max_buf_size(buff_size)
         .build(connector);
 
     let sem = Semaphore::new(parallel_tasks);
