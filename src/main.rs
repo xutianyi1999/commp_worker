@@ -177,7 +177,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
                 commitment.consume(&chunk);
             }
 
-            let zero_size = upsize.0 - read_data as u64;
+            let zero_size = upsize.0.saturating_sub(read_data as u64);
             ensure!(zero_size % 127 == 0);
 
             let common_hash = commitment::hash(&[0u8; 64]);
