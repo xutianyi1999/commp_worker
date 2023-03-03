@@ -1,21 +1,26 @@
 use std::{io, task, vec};
 use std::cmp::min;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
+use chrono::Utc;
 use cid::Cid;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures_util::{FutureExt, StreamExt};
 use futures_util::future::Map;
-use hyper::{Body, Client, http, Request, Response, Server, Uri};
+use hyper::{Body, Client, http, Method, Request, Response, Server, Uri};
 use hyper::body::Buf;
 use hyper::client::connect::dns::{GaiAddrs, GaiFuture, GaiResolver, Name};
 use hyper::client::HttpConnector;
+use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, Service, service_fn};
 use log::{debug, error, info, LevelFilter, warn};
 use log4rs::append::console::ConsoleAppender;
@@ -23,12 +28,13 @@ use log4rs::config::{Appender, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use mimalloc::MiMalloc;
 use multihash::Multihash;
-use parking_lot::Mutex;
+use once_cell::sync::Lazy;
+use parking_lot::{Mutex, RwLock};
+use prettytable::{row, Table};
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use tokio::time::Instant;
 use url::Url;
 
 use crate::bytes_amount::{PaddedBytesAmount, UnpaddedBytesAmount};
@@ -38,9 +44,12 @@ mod bytes_amount;
 mod commitment;
 mod fr32_util;
 
+type TaskID = u32;
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-static BUFFER_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static TASKS: Lazy<RwLock<HashMap<TaskID, Task>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Clone)]
 struct RoundRobin {
@@ -95,7 +104,7 @@ pub fn get_object_url(key: &str, bucket: &Bucket, config: &S3Config) -> Result<U
     Ok(url)
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Req {
     key: String,
     padded_piece_size: u64,
@@ -109,7 +118,36 @@ struct Context {
     sem: Semaphore,
 }
 
-async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>, http::Error> {
+#[derive(ValueEnum, Serialize, Deserialize, Copy, Clone, PartialEq)]
+enum TaskState {
+    Wait,
+    Run,
+}
+
+impl Display for TaskState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskState::Wait => write!(f, "wait"),
+            TaskState::Run => write!(f, "run")
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Task {
+    req: Req,
+    remote: IpAddr,
+    state: TaskState,
+    time: i64,
+}
+
+async fn add(
+    ctx: Arc<Context>,
+    req: Request<Body>,
+    remote: IpAddr,
+) -> Result<Response<Body>, http::Error> {
+    let task_id = rand::random();
+
     let fut = async {
         let body = hyper::body::aggregate(req.into_body()).await?;
         let req: Req = serde_json::from_reader(body.reader())?;
@@ -117,8 +155,24 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let upsize = UnpaddedBytesAmount::from(PaddedBytesAmount(req.padded_piece_size));
         ensure!(upsize.0 % 127 == 0);
 
+        let t = Task {
+            req: req.clone(),
+            remote,
+            state: TaskState::Wait,
+            time: Utc::now().timestamp(),
+        };
+
+        TASKS.write().insert(task_id, t);
         let _permit = ctx.sem.acquire().await?;
-        let t = Instant::now();
+
+        let t = Utc::now().timestamp();
+        match TASKS.write().get_mut(&task_id) {
+            None => return Err(anyhow!("Can't change task state")),
+            Some(task) => {
+                task.state = TaskState::Run;
+                task.time = t;
+            }
+        };
 
         let object_url = get_object_url(&req.key, &ctx.bucket, &ctx.s3)?;
         let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
@@ -166,7 +220,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
                 }
 
                 buff.clear();
-                BUFFER_QUEUE.lock().push(buff);
+                BUFFER_POOL.lock().push(buff);
             }
 
             if remain != 0 {
@@ -191,7 +245,7 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let mut body = resp.into_body();
 
         let get_buf = || {
-            BUFFER_QUEUE.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(ctx.buff_size))
+            BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(ctx.buff_size))
         };
 
         let mut buff = get_buf();
@@ -218,8 +272,59 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
         let hash = Multihash::wrap(0x1012, &cid_buff)?;
         let c = Cid::new_v1(0xf101, hash);
 
-        info!("compute {} commp use {} secs", req.key, t.elapsed().as_secs());
+
+        info!("compute {} commp use {} secs", req.key, Utc::now().timestamp() - t);
         Result::<_, anyhow::Error>::Ok(Response::new(Body::from(c.to_string())))
+    };
+
+    let res = match fut.await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            error!("{}", e);
+
+            Response::builder()
+                .status(500)
+                .body(Body::from(e.to_string()))
+        }
+    };
+
+    TASKS.write().remove(&task_id);
+    res
+}
+
+#[derive(Serialize, Deserialize)]
+struct Condition {
+    remote: HashSet<IpAddr>,
+    state: Option<TaskState>,
+    key: HashSet<String>,
+}
+
+async fn info(req: Request<Body>) -> Result<Response<Body>, http::Error> {
+    let fut = async {
+        let body = hyper::body::aggregate(req.into_body()).await?;
+        let cond: Condition = serde_json::from_reader(body.reader())?;
+
+        let tasks = TASKS.read().clone();
+
+        let tasks: Vec<Task> = tasks.into_iter()
+            .map(|(_, t)| t)
+            .filter(|task| {
+                if cond.remote.is_empty() {
+                    return true;
+                }
+                cond.remote.contains(&task.remote)
+            })
+            .filter(|task| cond.state.map(|v| v == task.state).unwrap_or(true))
+            .filter(|task| {
+                if cond.key.is_empty() {
+                    return true;
+                }
+                cond.key.contains(&task.req.key)
+            })
+            .collect();
+
+        let bytes = serde_json::to_vec(&tasks)?;
+        Result::<_, anyhow::Error>::Ok(Response::new(Body::from(bytes)))
     };
 
     match fut.await {
@@ -234,7 +339,67 @@ async fn handle(ctx: Arc<Context>, req: Request<Body>) -> Result<Response<Body>,
     }
 }
 
-async fn exec(
+async fn router(
+    ctx: Arc<Context>,
+    remote: IpAddr,
+    req: Request<Body>,
+) -> Result<Response<Body>, http::Error> {
+    match req.uri().path() {
+        "/add" => add(ctx, req, remote).await,
+        "/info" => info(req).await,
+        _ => {
+            Response::builder()
+                .status(404)
+                .body(Body::empty())
+        }
+    }
+}
+
+fn info_call(
+    limit: usize,
+    dst: &str,
+    cond: Condition
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://{}/info", dst))
+        .body(Body::from(serde_json::to_vec(&cond)?))?;
+
+    rt.block_on(async {
+        let c = hyper::client::Client::new();
+        let resp = c.request(req).await?;
+
+        let (parts, body) = resp.into_parts();
+
+        if parts.status != 200 {
+            let bytes = hyper::body::to_bytes(body).await?;
+            let msg = String::from_utf8(bytes.to_vec())?;
+            return Err(anyhow!("HTTP response code: {}, message: {}", parts.status.as_u16(), msg));
+        }
+
+        let body = hyper::body::aggregate(body).await?;
+        let tasks: Vec<Task> = serde_json::from_reader(body.reader())?;
+        println!("count: {}", tasks.len());
+
+        let now = Utc::now().timestamp();
+
+        let mut table = Table::new();
+        table.add_row(row!["KEY", "STATE", "REMOTE", "ELAPSED"]);
+
+        for x in tasks.into_iter().take(limit) {
+            table.add_row(row![x.req.key, x.state, x.remote, now - x.time]);
+        }
+
+        table.printstd();
+        Ok(())
+    })
+}
+
+async fn daemon(
     bind_addr: SocketAddr,
     s3_config: S3Config,
     buff_size: usize,
@@ -252,7 +417,8 @@ async fn exec(
     connector.set_recv_buffer_size(Some(1073741824));
 
     let client = Client::builder()
-        .http1_max_buf_size(buff_size)
+        // 64MB
+        .http1_max_buf_size(67108864)
         .build(connector);
 
     let sem = Semaphore::new(parallel_tasks);
@@ -266,12 +432,13 @@ async fn exec(
     };
     let ctx = Arc::new(ctx);
 
-    let make_service = make_service_fn(move |_| {
+    let make_service = make_service_fn(move |addr: &AddrStream| {
         let ctx = ctx.clone();
+        let remote = addr.remote_addr().ip();
 
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                handle(ctx.clone(), req)
+                router(ctx.clone(), remote, req)
             }))
         }
     });
@@ -313,30 +480,83 @@ fn logger_init() -> Result<()> {
 
 #[derive(Parser)]
 #[command(version)]
-struct Args {
-    /// s3 config file path
-    #[arg(short, long)]
-    s3_config_path: String,
+enum Args {
+    Daemon {
+        /// s3 config file path
+        #[arg(short, long)]
+        s3_config_path: String,
 
-    #[arg(short, long)]
-    bind_addr: SocketAddr,
+        #[arg(short, long, default_value = "0.0.0.0:30000")]
+        bind_addr: SocketAddr,
 
-    #[arg(long)]
-    buff_size: usize,
+        #[arg(long, default_value_t = 536870912)]
+        buff_size: usize,
 
-    #[arg(short, long)]
-    parallel_tasks: usize,
+        #[arg(short, long, default_value_t = 80)]
+        parallel_tasks: usize,
+    },
+    Info {
+        #[arg(short, long, default_value = "127.0.0.1:30000")]
+        api_addr: String,
+
+        #[arg(short, long)]
+        remote: Vec<IpAddr>,
+
+        #[arg(short, long)]
+        state: Option<TaskState>,
+
+        #[arg(short, long)]
+        key: Vec<String>,
+
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize
+    },
 }
 
-fn main() -> Result<()> {
+fn exec() -> Result<()> {
     let args: Args = Args::parse();
 
-    let config = std::fs::read(args.s3_config_path)?;
-    let s3_config: S3Config = toml::from_slice(&config)?;
+    match args {
+        Args::Daemon {
+            s3_config_path,
+            bind_addr,
+            buff_size,
+            parallel_tasks,
+        } => {
+            let config = std::fs::read(s3_config_path)?;
+            let s3_config: S3Config = toml::from_slice(&config)?;
 
-    logger_init()?;
+            logger_init()?;
 
-    let rt = tokio::runtime::Runtime::new()?;
-    info!("Listening on http://{}", args.bind_addr);
-    rt.block_on(exec(args.bind_addr, s3_config, args.buff_size, args.parallel_tasks))
+            let rt = tokio::runtime::Runtime::new()?;
+            info!("Listening on http://{}", bind_addr);
+            rt.block_on(daemon(bind_addr, s3_config, buff_size, parallel_tasks))
+        }
+        Args::Info {
+            api_addr,
+            remote,
+            state,
+            key,
+            limit
+        } => {
+            let cond = Condition {
+                remote: HashSet::from_iter(remote),
+                state,
+                key: HashSet::from_iter(key)
+            };
+
+            info_call(limit, &api_addr, cond)?;
+            Ok(())
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match exec() {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
 }
