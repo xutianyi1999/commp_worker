@@ -361,7 +361,7 @@ fn info_call(
     cond: Condition
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
+        .enable_all()
         .build()?;
 
     let req = Request::builder()
@@ -388,7 +388,7 @@ fn info_call(
         let now = Utc::now().timestamp();
 
         let mut table = Table::new();
-        table.add_row(row!["KEY", "STATE", "REMOTE", "ELAPSED"]);
+        table.add_row(row!["KEY", "STATE", "REMOTE", "ELAPSED (SEC)"]);
 
         for x in tasks.into_iter().take(limit) {
             table.add_row(row![x.req.key, x.state, x.remote, now - x.time]);
