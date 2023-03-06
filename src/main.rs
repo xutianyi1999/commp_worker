@@ -272,7 +272,6 @@ async fn add(
         let hash = Multihash::wrap(0x1012, &cid_buff)?;
         let c = Cid::new_v1(0xf101, hash);
 
-
         info!("compute {} commp use {} secs", req.key, Utc::now().timestamp() - t);
         Result::<_, anyhow::Error>::Ok(Response::new(Body::from(c.to_string())))
     };
@@ -545,8 +544,7 @@ fn exec() -> Result<()> {
                 key: HashSet::from_iter(key)
             };
 
-            info_call(limit, &api_addr, cond)?;
-            Ok(())
+            info_call(limit, &api_addr, cond)
         }
     }
 }
