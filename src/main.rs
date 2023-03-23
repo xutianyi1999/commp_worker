@@ -1,6 +1,6 @@
 use std::{io, task, vec};
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
@@ -293,9 +293,9 @@ async fn add(
 
 #[derive(Serialize, Deserialize)]
 struct Condition {
-    remote: HashSet<IpAddr>,
+    remote: Vec<IpAddr>,
     state: Option<TaskState>,
-    key: HashSet<String>,
+    key: Vec<String>,
 }
 
 async fn info(req: Request<Body>) -> Result<Response<Body>, http::Error> {
@@ -539,9 +539,9 @@ fn exec() -> Result<()> {
             limit
         } => {
             let cond = Condition {
-                remote: HashSet::from_iter(remote),
+                remote,
                 state,
-                key: HashSet::from_iter(key)
+                key
             };
 
             info_call(limit, &api_addr, cond)
