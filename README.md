@@ -15,6 +15,7 @@ Options:
 
 example:
 ```shell
+ulimit -n 65535
 TOKIO_WORKER_THREADS=20 ./commp_worker daemon -b "0.0.0.0:30000" -s ./s3.toml --buff-size 536870912 -p 80
 ```
 
