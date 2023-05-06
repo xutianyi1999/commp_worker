@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use arrayvec::ArrayVec;
 use digest::Digest;
 use sha2::Sha256;
 
@@ -7,13 +8,13 @@ use crate::fr32_util;
 const NODE_SIZE: usize = 32;
 
 struct Cache {
-    cache: Vec<Option<[u8; 32]>>,
+    cache: ArrayVec<Option<[u8; 32]>, 64>,
 }
 
 impl Cache {
     fn new() -> Self {
         Cache {
-            cache: Vec::with_capacity(64)
+            cache: ArrayVec::new()
         }
     }
 
@@ -30,7 +31,10 @@ impl Cache {
                 Some(left) => cid = piece_hash(&left, &cid)
             }
         }
-        cache.push(Some(cid));
+
+        unsafe {
+            cache.push_unchecked(Some(cid));
+        }
     }
 }
 

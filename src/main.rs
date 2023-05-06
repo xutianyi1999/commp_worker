@@ -305,8 +305,7 @@ async fn info(req: Request<Body>) -> Result<Response<Body>, http::Error> {
 
         let tasks = TASKS.read().clone();
 
-        let tasks: Vec<Task> = tasks.into_iter()
-            .map(|(_, t)| t)
+        let tasks: Vec<Task> = tasks.into_values()
             .filter(|task| {
                 if cond.remote.is_empty() {
                     return true;
