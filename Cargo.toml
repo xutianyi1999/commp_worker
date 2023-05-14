@@ -26,11 +26,12 @@ chrono = "0.4"
 prettytable-rs = "0.10"
 arrayvec = "0.7"
 
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["asm"] }
 digest = "0.10"
 multihash = { version = "0.18", default-features = false }
 fr32 = "5"
 cid = { version = "0.10" }
+gen_merkletree_cache = { git = "https://github.com/xutianyi1999/gen_merkletree_cache.git" }
 
 [profile.release]
 lto = true

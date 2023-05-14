@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 use arrayvec::ArrayVec;
 use digest::Digest;
 use sha2::Sha256;
@@ -78,18 +78,64 @@ impl Commitment {
         self.current_tree.push(hash);
     }
 
-    pub fn finish(self) -> Result<[u8; 32]> {
-        let Commitment { mut current_tree, .. } = self;
+    pub fn finish(self, mut count: u64) -> Result<[u8; 32]> {
+        if count == 0 {
+            let Commitment { mut current_tree, .. } = self;
 
-        let mut f = || {
-            current_tree.cache.pop()?
-        };
-        f().ok_or_else(|| anyhow!("Get tree hash root failed"))
-    }
+            let mut f = || {
+                current_tree.cache.pop()?
+            };
 
-    #[inline(always)]
-    pub fn consume_with_hash(&mut self, hash: [u8; 32]) {
-        self.current_tree.push(hash);
+            return f().ok_or_else(|| anyhow!("Get tree hash root failed"));
+        }
+
+        const ZERO_CACHE: [[u8; 32]; 64] = gen_merkletree_cache::generate!(64);
+        let mut next: Option<([u8; 32], usize)> = None;
+
+        macro_rules! sub {
+            ($value: expr) => {
+                ensure!(count >= $value);
+                count -= $value;
+            };
+        }
+
+        for (layer, opt) in self.current_tree.cache.into_iter().enumerate() {
+            let hash = match opt {
+                None => {
+                    match next {
+                        None => continue,
+                        Some((left, _)) => {
+                            sub!(2u64.pow(layer as u32));
+                            piece_hash(&left, &ZERO_CACHE[layer])
+                        }
+                    }
+                }
+                Some(left) => {
+                    match next {
+                        None => {
+                            sub!(2u64.pow(layer as u32));
+                            piece_hash(&left, &ZERO_CACHE[layer])
+                        },
+                        Some((right, _)) => piece_hash(&left, &right)
+                    }
+                }
+            };
+            next = Some((hash, layer + 1));
+        }
+
+        if next.is_none() {
+            return Ok(ZERO_CACHE[count.ilog2() as usize])
+        }
+
+        let (mut next, mut layer) = next.unwrap();
+
+        while count > 0 {
+            sub!(2u64.pow(layer as u32));
+            next = piece_hash(&next, &ZERO_CACHE[layer]);
+            layer += 1;
+        }
+
+        Ok(next)
     }
 
     #[inline(always)]

@@ -233,13 +233,7 @@ async fn add(
 
             let zero_size = upsize.0.saturating_sub(read_data as u64);
             ensure!(zero_size % 127 == 0);
-
-            let common_hash = commitment::hash(&[0u8; 64]);
-
-            for _ in 0..zero_size / 127 * 2 {
-                commitment.consume_with_hash(common_hash);
-            }
-            commitment.finish()
+            commitment.finish(zero_size / 127 * 2)
         });
 
         let mut body = resp.into_body();
