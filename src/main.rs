@@ -3,6 +3,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -141,6 +142,31 @@ struct Task {
     time: i64,
 }
 
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    S3(&'a str),
+    Local(&'a str),
+}
+
+impl <'a>TryFrom<&'a str> for Source<'a> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &'a str) -> std::result::Result<Self, Self::Error> {
+        let (proto, path) = sscanf::sscanf!(value, "{}:{}", str, str).map_err(|_| anyhow!("cannot parse key {}", value))?;
+
+        let s = match proto {
+            "qiniu" => Source::S3(path),
+            "path" => Source::Local(path),
+            _ => return Err(anyhow!("not support {} protocol", proto))
+        };
+        Ok(s)
+    }
+}
+
+fn get_buf(buff_size: usize) -> Vec<u8> {
+    BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(buff_size))
+}
+
 async fn add(
     ctx: Arc<Context>,
     req: Request<Body>,
@@ -173,13 +199,6 @@ async fn add(
                 task.time = t;
             }
         };
-
-        let object_url = get_object_url(&req.key, &ctx.bucket, &ctx.s3)?;
-        let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
-
-        if resp.status() != 200 {
-            return Ok(resp);
-        }
 
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
@@ -236,31 +255,71 @@ async fn add(
             commitment.finish(zero_size / 127 * 2)
         });
 
-        let mut body = resp.into_body();
+        let source = Source::try_from(req.key.as_str())?;
+        let buff_size = ctx.buff_size;
 
-        let get_buf = || {
-            BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(ctx.buff_size))
-        };
+        match source {
+            Source::S3(path) => {
+                let object_url = get_object_url(path, &ctx.bucket, &ctx.s3)?;
+                let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
-        let mut buff = get_buf();
+                if resp.status() != 200 {
+                    return Ok(resp);
+                }
 
-        while let Some(res) = body.next().await {
-            let packet = res?;
+                let mut body = resp.into_body();
+                let mut buff = get_buf(buff_size);
 
-            if buff.len() + packet.len() > buff.capacity() {
-                ensure!(ctx.buff_size >= packet.len());
+                while let Some(res) = body.next().await {
+                    let packet = res?;
 
-                let buff = std::mem::replace(&mut buff, get_buf());
-                tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                    if buff.len() + packet.len() > buff.capacity() {
+                        ensure!(ctx.buff_size >= packet.len());
+
+                        let buff = std::mem::replace(&mut buff, get_buf(buff_size));
+                        tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                    }
+                    buff.extend(packet);
+                }
+
+                if !buff.is_empty() {
+                    tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                }
+                drop(tx);
             }
-            buff.extend(packet);
+            Source::Local(path) => {
+                let path = path.to_string();
+
+                let read_task = tokio::task::spawn_blocking(move || {
+                    let mut file = std::fs::File::open(path)?;
+                    const COPY_BUF_SIZE: usize = 65536;
+
+                    let mut copy_buf = vec![0u8; COPY_BUF_SIZE];
+                    let mut buff = get_buf(buff_size);
+
+                    loop {
+                        if buff.len() == buff.capacity() {
+                            let old = std::mem::replace(&mut buff, get_buf(buff_size));
+                            tx.send(old).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                        }
+
+                        let len = file.read(&mut copy_buf[..min(COPY_BUF_SIZE, buff.capacity() - buff.len())])?;
+
+                        if len == 0 {
+                            break;
+                        }
+                        buff.extend_from_slice(&copy_buf[..len]);
+                    }
+
+                    if !buff.is_empty() {
+                        tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                    }
+                    Result::<_, anyhow::Error>::Ok(())
+                });
+                read_task.await??;
+            }
         }
 
-        if !buff.is_empty() {
-            tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
-        }
-
-        drop(tx);
         let cid_buff = join.await??;
 
         let hash = Multihash::wrap(0x1012, &cid_buff)?;
@@ -350,7 +409,7 @@ async fn router(
 fn info_call(
     limit: usize,
     dst: &str,
-    cond: Condition
+    cond: Condition,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -501,7 +560,7 @@ enum Args {
         key: Vec<String>,
 
         #[arg(short, long, default_value_t = 20)]
-        limit: usize
+        limit: usize,
     },
 }
 
@@ -534,7 +593,7 @@ fn exec() -> Result<()> {
             let cond = Condition {
                 remote,
                 state,
-                key
+                key,
             };
 
             info_call(limit, &api_addr, cond)
