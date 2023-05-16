@@ -281,7 +281,10 @@ async fn add(
 
                 if !buff.is_empty() {
                     tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                } else {
+                    BUFFER_POOL.lock().push(buff);
                 }
+
                 drop(tx);
             }
             Source::Local(path) => {
@@ -310,6 +313,8 @@ async fn add(
 
                     if !buff.is_empty() {
                         tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
+                    } else {
+                        BUFFER_POOL.lock().push(buff);
                     }
                     Result::<_, anyhow::Error>::Ok(())
                 });
