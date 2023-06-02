@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::{Deref, DerefMut};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -88,6 +89,43 @@ impl Service<Name> for RoundRobin {
     }
 }
 
+struct Bytes {
+    inner: Vec<u8>
+}
+
+impl Bytes {
+    fn alloc(size: usize) -> Self {
+        let inner = BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(size));
+
+        Bytes {
+            inner
+        }
+    }
+}
+
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        let mut buff = std::mem::take(&mut self.inner);
+        buff.clear();
+
+        BUFFER_POOL.lock().push(buff);
+    }
+}
+
+impl Deref for Bytes {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for Bytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3Config {
     pub host: String,
@@ -160,10 +198,6 @@ impl <'a>TryFrom<&'a str> for Source<'a> {
     }
 }
 
-fn get_buf(buff_size: usize) -> Vec<u8> {
-    BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::<u8>::with_capacity(buff_size))
-}
-
 async fn add(
     ctx: Arc<Context>,
     req: Request<Body>,
@@ -197,7 +231,7 @@ async fn add(
             }
         };
 
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = std::sync::mpsc::channel::<Bytes>();
 
         let join = tokio::task::spawn_blocking(move || {
             let mut commitment = Commitment::new();
@@ -205,7 +239,7 @@ async fn add(
             let mut read_data = 0;
             let mut remain = 0;
 
-            while let Ok(mut buff) = rx.recv() {
+            while let Ok(buff) = rx.recv() {
                 read_data += buff.len();
                 let mut right = buff.as_slice();
 
@@ -234,9 +268,6 @@ async fn add(
                     chunk[..right.len()].copy_from_slice(right);
                     remain = right.len()
                 }
-
-                buff.clear();
-                BUFFER_POOL.lock().push(buff);
             }
 
             if remain != 0 {
@@ -265,7 +296,7 @@ async fn add(
                 }
 
                 let mut body = resp.into_body();
-                let mut buff = get_buf(buff_size);
+                let mut buff = Bytes::alloc(buff_size);
 
                 while let Some(res) = body.next().await {
                     let packet = res?;
@@ -273,7 +304,7 @@ async fn add(
                     if buff.len() + packet.len() > buff.capacity() {
                         ensure!(ctx.buff_size >= packet.len());
 
-                        let buff = std::mem::replace(&mut buff, get_buf(buff_size));
+                        let buff = std::mem::replace(&mut buff, Bytes::alloc(buff_size));
                         tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
                     }
                     buff.extend(packet);
@@ -281,8 +312,6 @@ async fn add(
 
                 if !buff.is_empty() {
                     tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
-                } else {
-                    BUFFER_POOL.lock().push(buff);
                 }
 
                 drop(tx);
@@ -295,11 +324,11 @@ async fn add(
                     const COPY_BUF_SIZE: usize = 65536;
 
                     let mut copy_buf = vec![0u8; COPY_BUF_SIZE];
-                    let mut buff = get_buf(buff_size);
+                    let mut buff = Bytes::alloc(buff_size);
 
                     loop {
                         if buff.len() == buff.capacity() {
-                            let old = std::mem::replace(&mut buff, get_buf(buff_size));
+                            let old = std::mem::replace(&mut buff, Bytes::alloc(buff_size));
                             tx.send(old).map_err(|_| anyhow!("compute task has been shutdown"))?;
                         }
 
@@ -313,8 +342,6 @@ async fn add(
 
                     if !buff.is_empty() {
                         tx.send(buff).map_err(|_| anyhow!("compute task has been shutdown"))?;
-                    } else {
-                        BUFFER_POOL.lock().push(buff);
                     }
                     Result::<_, anyhow::Error>::Ok(())
                 });
