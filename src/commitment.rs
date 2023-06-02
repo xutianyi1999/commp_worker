@@ -139,10 +139,8 @@ impl Commitment {
     }
 
     #[inline(always)]
-    pub fn consume(&mut self, in_buff: &[u8; 128]) {
-        let mut out_buff = [0u8; 128];
-
-        fr32_util::process_block(in_buff, &mut out_buff);
+    pub fn consume(&mut self, in_buff: &[u8; 128], out_buff: &mut [u8; 128]) {
+        fr32_util::process_block(in_buff, out_buff);
         self.put_leaf((&out_buff[..64]).try_into().unwrap());
         self.put_leaf((&out_buff[64..]).try_into().unwrap());
     }
