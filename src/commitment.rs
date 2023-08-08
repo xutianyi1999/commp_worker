@@ -5,39 +5,6 @@ use sha2::Sha256;
 
 use crate::fr32_util;
 
-const NODE_SIZE: usize = 32;
-
-struct Cache {
-    cache: ArrayVec<Option<[u8; 32]>, 64>,
-}
-
-impl Cache {
-    fn new() -> Self {
-        Cache {
-            cache: ArrayVec::new()
-        }
-    }
-
-    #[inline(always)]
-    fn push(&mut self, mut cid: [u8; 32]) {
-        let cache = &mut self.cache;
-
-        for opt in cache.iter_mut() {
-            match opt.take() {
-                None => {
-                    *opt = Some(cid);
-                    return;
-                }
-                Some(left) => cid = piece_hash(&left, &cid)
-            }
-        }
-
-        unsafe {
-            cache.push_unchecked(Some(cid));
-        }
-    }
-}
-
 #[inline(always)]
 fn trim_to_fr32(buff: &mut [u8; 32]) {
     // strip last two bits, to ensure result is in Fr.
@@ -52,16 +19,50 @@ pub fn hash(data: &[u8; 64]) -> [u8; 32] {
     *hash
 }
 
-pub struct Commitment {
-    current_tree: Cache,
+#[inline(always)]
+fn piece_hash(
+    a: &[u8; 32],
+    b: &[u8; 32],
+    compute_buff: &mut [u8; 64],
+) -> [u8; 32] {
+    compute_buff[..32].copy_from_slice(a);
+    compute_buff[32..].copy_from_slice(b);
+    hash(compute_buff)
 }
 
-#[inline(always)]
-fn piece_hash(a: &[u8; NODE_SIZE], b: &[u8; NODE_SIZE]) -> [u8; 32] {
-    let mut buf = [0u8; NODE_SIZE * 2];
-    buf[..NODE_SIZE].copy_from_slice(a);
-    buf[NODE_SIZE..].copy_from_slice(b);
-    hash(&buf)
+struct Cache {
+    cache: ArrayVec<Option<[u8; 32]>, 64>,
+}
+
+impl Cache {
+    fn new() -> Self {
+        Cache {
+            cache: ArrayVec::new(),
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, mut cid: [u8; 32], compute_buff: &mut [u8; 64]) {
+        let cache = &mut self.cache;
+
+        for opt in cache.iter_mut() {
+            match opt.take() {
+                None => {
+                    *opt = Some(cid);
+                    return;
+                }
+                Some(left) => cid = piece_hash(&left, &cid, compute_buff)
+            }
+        }
+
+        unsafe {
+            cache.push_unchecked(Some(cid));
+        }
+    }
+}
+
+pub struct Commitment {
+    current_tree: Cache,
 }
 
 impl Commitment {
@@ -73,9 +74,9 @@ impl Commitment {
 
     /// Attempt to generate the next hash, but only if the buffers are full.
     #[inline(always)]
-    fn put_leaf(&mut self, in_buff: &[u8; 64]) {
+    fn put_leaf(&mut self, in_buff: &mut [u8; 64]) {
         let hash = hash(in_buff);
-        self.current_tree.push(hash);
+        self.current_tree.push(hash, in_buff);
     }
 
     pub fn finish(self, mut count: u64) -> Result<[u8; 32]> {
@@ -90,6 +91,7 @@ impl Commitment {
         }
 
         const ZERO_CACHE: [[u8; 32]; 64] = gen_merkletree_cache::generate!(64);
+        let mut compute_buff = [0u8; 64];
         let mut next: Option<([u8; 32], usize)> = None;
 
         macro_rules! sub {
@@ -106,7 +108,7 @@ impl Commitment {
                         None => continue,
                         Some((left, _)) => {
                             sub!(2u64.pow(layer as u32));
-                            piece_hash(&left, &ZERO_CACHE[layer])
+                            piece_hash(&left, &ZERO_CACHE[layer], &mut compute_buff)
                         }
                     }
                 }
@@ -114,9 +116,9 @@ impl Commitment {
                     match next {
                         None => {
                             sub!(2u64.pow(layer as u32));
-                            piece_hash(&left, &ZERO_CACHE[layer])
-                        },
-                        Some((right, _)) => piece_hash(&left, &right)
+                            piece_hash(&left, &ZERO_CACHE[layer], &mut compute_buff)
+                        }
+                        Some((right, _)) => piece_hash(&left, &right, &mut compute_buff)
                     }
                 }
             };
@@ -124,14 +126,14 @@ impl Commitment {
         }
 
         if next.is_none() {
-            return Ok(ZERO_CACHE[count.ilog2() as usize])
+            return Ok(ZERO_CACHE[count.ilog2() as usize]);
         }
 
         let (mut next, mut layer) = next.unwrap();
 
         while count > 0 {
             sub!(2u64.pow(layer as u32));
-            next = piece_hash(&next, &ZERO_CACHE[layer]);
+            next = piece_hash(&next, &ZERO_CACHE[layer], &mut compute_buff);
             layer += 1;
         }
 
@@ -141,7 +143,7 @@ impl Commitment {
     #[inline(always)]
     pub fn consume(&mut self, in_buff: &[u8; 128], out_buff: &mut [u8; 128]) {
         fr32_util::process_block(in_buff, out_buff);
-        self.put_leaf((&out_buff[..64]).try_into().unwrap());
-        self.put_leaf((&out_buff[64..]).try_into().unwrap());
+        self.put_leaf((&mut out_buff[..64]).try_into().unwrap());
+        self.put_leaf((&mut out_buff[64..]).try_into().unwrap());
     }
 }

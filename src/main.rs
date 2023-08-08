@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -565,7 +566,7 @@ enum Args {
     Daemon {
         /// s3 config file path
         #[arg(short, long)]
-        s3_config_path: String,
+        s3_config_path: PathBuf,
 
         #[arg(short, long, default_value = "0.0.0.0:30000")]
         bind_addr: SocketAddr,
