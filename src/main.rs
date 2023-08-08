@@ -91,7 +91,7 @@ impl Service<Name> for RoundRobin {
 }
 
 struct Bytes {
-    inner: Vec<u8>
+    inner: Vec<u8>,
 }
 
 impl Bytes {
@@ -187,7 +187,7 @@ enum Source<'a> {
     Local(&'a str),
 }
 
-impl <'a>TryFrom<&'a str> for Source<'a> {
+impl<'a> TryFrom<&'a str> for Source<'a> {
     type Error = anyhow::Error;
 
     fn try_from(value: &'a str) -> std::result::Result<Self, Self::Error> {
@@ -237,7 +237,10 @@ async fn add(
         let join = tokio::task::spawn_blocking(move || {
             let mut commitment = Commitment::new();
             let mut chunk = [0u8; 128];
-            let mut compute_buff = [0u8; 128];
+
+            let mut compute_buff = [0u128; 8];
+            let compute_buff: &mut [u8; 128] = unsafe { std::mem::transmute(&mut compute_buff) };
+
             let mut read_data = 0;
             let mut remain = 0;
 
@@ -252,7 +255,7 @@ async fn add(
 
                     if l.len() + remain == 127 {
                         remain = 0;
-                        commitment.consume(&chunk, &mut compute_buff);
+                        commitment.consume(&chunk, compute_buff);
                     } else {
                         remain += l.len();
                     }
@@ -263,7 +266,7 @@ async fn add(
                     chunk[0..127].copy_from_slice(l);
                     right = r;
 
-                    commitment.consume(&chunk, &mut compute_buff);
+                    commitment.consume(&chunk, compute_buff);
                 }
 
                 if right.len() != 0 {
@@ -277,7 +280,7 @@ async fn add(
                     *x = 0;
                 }
                 read_data += 127 - remain;
-                commitment.consume(&chunk, &mut compute_buff);
+                commitment.consume(&chunk, compute_buff);
             }
 
             let zero_size = upsize.0.saturating_sub(read_data as u64);
