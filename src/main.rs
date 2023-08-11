@@ -236,7 +236,9 @@ async fn add(
 
         let join = tokio::task::spawn_blocking(move || {
             let mut commitment = Commitment::new();
-            let mut chunk = [0u8; 128];
+
+            let mut chunk = [0u128; 8];
+            let chunk: &mut [u8; 128] = unsafe { std::mem::transmute(&mut chunk) };
 
             let mut compute_buff = [0u128; 8];
             let compute_buff: &mut [u8; 128] = unsafe { std::mem::transmute(&mut compute_buff) };
@@ -255,7 +257,7 @@ async fn add(
 
                     if l.len() + remain == 127 {
                         remain = 0;
-                        commitment.consume(&chunk, compute_buff);
+                        commitment.consume(chunk, compute_buff);
                     } else {
                         remain += l.len();
                     }
@@ -266,7 +268,7 @@ async fn add(
                     chunk[0..127].copy_from_slice(l);
                     right = r;
 
-                    commitment.consume(&chunk, compute_buff);
+                    commitment.consume(chunk, compute_buff);
                 }
 
                 if right.len() != 0 {
@@ -280,7 +282,7 @@ async fn add(
                     *x = 0;
                 }
                 read_data += 127 - remain;
-                commitment.consume(&chunk, compute_buff);
+                commitment.consume(chunk, compute_buff);
             }
 
             let zero_size = upsize.0.saturating_sub(read_data as u64);
