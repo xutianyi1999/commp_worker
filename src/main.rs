@@ -37,6 +37,7 @@ use prettytable::{row, Table};
 use rand::Rng;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::{Deserialize, Serialize};
+use thread_priority::ThreadPriority;
 use tokio::sync::Semaphore;
 use url::Url;
 
@@ -615,7 +616,13 @@ fn exec() -> Result<()> {
 
             logger_init()?;
 
-            let rt = tokio::runtime::Runtime::new()?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .on_thread_start(|| {
+                    thread_priority::set_current_thread_priority(ThreadPriority::Max).expect("failed to set thread priority");
+                })
+                .build()?;
+
             info!("Listening on http://{}", bind_addr);
             rt.block_on(daemon(bind_addr, s3_config, buff_size, parallel_tasks))
         }
