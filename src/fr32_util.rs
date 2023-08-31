@@ -15,7 +15,7 @@ macro_rules! process_fr {
     }};
 }
 
-#[inline(always)]
+#[inline]
 pub fn process_block(in_buffer: &[u8; 128], out_buffer: &mut [u8; 128]) {
     let (in_buffer, out_buffer): (&[u128; 8], &mut [u128; 8]) = unsafe {
         std::mem::transmute((in_buffer, out_buffer))

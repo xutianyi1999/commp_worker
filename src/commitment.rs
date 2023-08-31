@@ -5,13 +5,13 @@ use sha2::Sha256;
 
 use crate::fr32_util;
 
-#[inline(always)]
+#[inline]
 fn trim_to_fr32(buff: &mut [u8; 32]) {
     // strip last two bits, to ensure result is in Fr.
     buff[31] &= 0b0011_1111;
 }
 
-#[inline(always)]
+#[inline]
 pub fn hash(data: &[u8; 64]) -> [u8; 32] {
     let mut hashed = Sha256::digest(data);
     let hash: &mut [u8; 32] = hashed.as_mut_slice().try_into().unwrap();
@@ -19,7 +19,7 @@ pub fn hash(data: &[u8; 64]) -> [u8; 32] {
     *hash
 }
 
-#[inline(always)]
+#[inline]
 fn piece_hash(
     a: &[u8; 32],
     b: &[u8; 32],
@@ -41,7 +41,7 @@ impl Cache {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, mut cid: [u8; 32], compute_buff: &mut [u8; 64]) {
         let cache = &mut self.cache;
 
@@ -73,7 +73,7 @@ impl Commitment {
     }
 
     /// Attempt to generate the next hash, but only if the buffers are full.
-    #[inline(always)]
+    #[inline]
     fn put_leaf(&mut self, in_buff: &mut [u8; 64]) {
         let hash = hash(in_buff);
         self.current_tree.push(hash, in_buff);
@@ -140,7 +140,7 @@ impl Commitment {
         Ok(next)
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn consume(&mut self, in_buff: &[u8; 128], out_buff: &mut [u8; 128]) {
         fr32_util::process_block(in_buff, out_buff);
         self.put_leaf((&mut out_buff[..64]).try_into().unwrap());
