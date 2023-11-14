@@ -24,17 +24,17 @@ TOKIO_WORKER_THREADS=20 ./commp_worker daemon -b "0.0.0.0:30000" -s ./s3.toml --
 ### s3config.toml
 ```toml
 ["/root/f001"]
-access_key = "xxx"
-bucket = "xxx"
 host = "http://xxx"
 region = "cn-east-1"
+bucket = "xxx"
+access_key = "xxx"
 secret_key = "xxx"
 
 ["/root/f002"]
-access_key = "xxx"
-bucket = "xxx"
 host = "http://xxx"
 region = "cn-east-1"
+bucket = "xxx"
+access_key = "xxx"
 secret_key = "xxx"
 ```
 
