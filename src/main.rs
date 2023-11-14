@@ -152,8 +152,7 @@ struct Req {
 }
 
 struct Context {
-    s3: S3Config,
-    bucket: Bucket,
+    s3: HashMap<String, S3Config>,
     client: Client<HttpConnector<RoundRobin>>,
     buff_size: usize,
     sem: Semaphore,
@@ -198,6 +197,12 @@ impl<'a> TryFrom<&'a str> for Source<'a> {
         };
         Ok(s)
     }
+}
+
+fn match_bucket<'a>(key: &str, configs: &'a HashMap<String, S3Config>) -> Option<&'a S3Config> {
+    configs.iter()
+        .find(|(prefix, _)| key.starts_with(*prefix))
+        .map(|(_, c)| c)
 }
 
 async fn add(
@@ -296,7 +301,16 @@ async fn add(
 
         match source {
             Source::S3(path) => {
-                let object_url = get_object_url(path, &ctx.bucket, &ctx.s3)?;
+                let s3= match_bucket(path, &ctx.s3).ok_or_else(|| anyhow!("corresponding s3 config of {} was not found", path))?;
+
+                let bucket = Bucket::new(
+                    Url::parse(&s3.host)?,
+                    UrlStyle::VirtualHost,
+                    s3.bucket.clone(),
+                    s3.region.clone(),
+                )?;
+
+                let object_url = get_object_url(path, &bucket, s3)?;
                 let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
                 if resp.status() != 200 {
@@ -489,17 +503,10 @@ fn info_call(
 
 async fn daemon(
     bind_addr: SocketAddr,
-    s3_config: S3Config,
+    configs: HashMap<String, S3Config>,
     buff_size: usize,
     parallel_tasks: usize,
 ) -> Result<()> {
-    let bucket = Bucket::new(
-        Url::parse(&s3_config.host)?,
-        UrlStyle::VirtualHost,
-        s3_config.bucket.clone(),
-        s3_config.region.clone(),
-    )?;
-
     let mut connector = HttpConnector::new_with_resolver(RoundRobin { inner: GaiResolver::new() });
     // 1GB
     connector.set_recv_buffer_size(Some(1073741824));
@@ -512,8 +519,7 @@ async fn daemon(
     let sem = Semaphore::new(parallel_tasks);
 
     let ctx = Context {
-        bucket,
-        s3: s3_config,
+        s3: configs,
         client,
         buff_size,
         sem,
@@ -612,7 +618,7 @@ fn exec() -> Result<()> {
             parallel_tasks,
         } => {
             let config = std::fs::read(s3_config_path)?;
-            let s3_config: S3Config = toml::from_slice(&config)?;
+            let configs: HashMap<String, S3Config> = toml::from_slice(&config)?;
 
             logger_init()?;
 
@@ -624,7 +630,7 @@ fn exec() -> Result<()> {
                 .build()?;
 
             info!("Listening on http://{}", bind_addr);
-            rt.block_on(daemon(bind_addr, s3_config, buff_size, parallel_tasks))
+            rt.block_on(daemon(bind_addr, configs, buff_size, parallel_tasks))
         }
         Args::Info {
             api_addr,
