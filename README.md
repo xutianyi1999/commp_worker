@@ -5,7 +5,7 @@ CommP Worker has higher computing throughput than official
 
 In which scenario should this repo be used?
 - You have a lot of Car files that need to calculate CommP
-- Your Car files are placed on S3 storage
+- Your Car files are stored on S3 storage
 
 ### Usage
 ```shell
@@ -56,7 +56,7 @@ prefix of key
 - `qiniu`: key on s3 storage
 - `/`: local file system
 
-padded_piece_size: The size of Car after filling with empty data
+`padded_piece_size`: The size of Car after filling with empty data
 
 Response
 
