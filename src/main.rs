@@ -192,8 +192,10 @@ impl<'a> TryFrom<&'a str> for Source<'a> {
     type Error = anyhow::Error;
 
     fn try_from(value: &'a str) -> std::result::Result<Self, Self::Error> {
-        let s = match sscanf::sscanf!(value, "qiniu:{}", str) {
-            Ok(path) => Source::S3(path),
+        let s = match sscanf::sscanf!(value, "{}:{}",str, str) {
+            Ok(("qiniu", path)) => Source::S3(path),
+            Ok(("s3", path)) => Source::S3(path),
+            Ok(_) => Source::Local(value),
             Err(_) => Source::Local(value)
         };
         Ok(s)
