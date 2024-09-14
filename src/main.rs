@@ -305,11 +305,12 @@ async fn add(
 
                 let bucket = Bucket::new(
                     Url::parse(&s3.host)?,
-                    UrlStyle::VirtualHost,
+                    UrlStyle::Path,
                     s3.bucket.clone(),
                     s3.region.clone(),
                 )?;
 
+                let path = path.trim_start_matches('/');
                 let object_url = get_object_url(path, &bucket, s3)?;
                 let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
