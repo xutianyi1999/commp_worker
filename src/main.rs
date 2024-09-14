@@ -296,6 +296,7 @@ async fn add(
 
         match source {
             Source::S3(path) => {
+                let path = path.trim_start_matches('/');
                 let object_url = get_object_url(path, &ctx.bucket, &ctx.s3)?;
                 let resp = ctx.client.get(Uri::from_str(object_url.as_str())?).await?;
 
@@ -495,7 +496,7 @@ async fn daemon(
 ) -> Result<()> {
     let bucket = Bucket::new(
         Url::parse(&s3_config.host)?,
-        UrlStyle::VirtualHost,
+        UrlStyle::Path,
         s3_config.bucket.clone(),
         s3_config.region.clone(),
     )?;
