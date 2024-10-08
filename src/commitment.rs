@@ -1,7 +1,5 @@
 use anyhow::{anyhow, ensure, Result};
 use arrayvec::ArrayVec;
-use digest::Digest;
-use sha2::Sha256;
 
 use crate::fr32_util;
 
@@ -11,10 +9,11 @@ fn trim_to_fr32(buff: &mut [u8; 32]) {
 }
 
 pub fn hash(data: &[u8; 64]) -> [u8; 32] {
-    let mut hashed = Sha256::digest(data);
-    let hash: &mut [u8; 32] = hashed.as_mut_slice().try_into().unwrap();
-    trim_to_fr32(hash);
-    *hash
+    let hashed = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(hashed.as_ref());
+    trim_to_fr32(&mut hash);
+    hash
 }
 
 fn piece_hash(
